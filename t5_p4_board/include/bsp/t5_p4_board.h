@@ -19,7 +19,7 @@
 
 #include "bsp/config.h"
 #include "bsp/display.h"
-#include "t5_p4_board.h"
+#include <t5_p4_board.h>
 
 #ifdef __cplusplus
 extern "C" {

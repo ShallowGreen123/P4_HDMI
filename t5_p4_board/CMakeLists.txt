@@ -10,6 +10,6 @@ idf_component_register(
     SRCS "t5_p4_board.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
-    REQUIRES ${REQ}
-    PRIV_REQUIRES ${PRIV_REQ} esp_lcd esp_psram
+    REQUIRES ${REQ} esp_lcd
+    PRIV_REQUIRES ${PRIV_REQ} esp_psram
 )

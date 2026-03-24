@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
+#include "esp_lcd_panel_ops.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_codec_dev.h"
 #include "driver/gpio.h"
