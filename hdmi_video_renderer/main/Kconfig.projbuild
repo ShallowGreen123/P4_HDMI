@@ -22,28 +22,6 @@ menu "HDMI MP4 Player Configuration"
                 1. MP4 video resolution must match the HDMI output resolution
                 2. This mode provides the highest possible frame rate
 
-        config DISPLAY_FRAME_WAIT_TIMEOUT_MS
-            int "Display frame wait timeout (ms)"
-            default 1000
-            range 10 60000
-            help
-                Maximum time to wait for the display completion callback after
-                submitting one decoded frame.
-
-                If the HDMI/MIPI display path stops generating callbacks, the
-                player can otherwise block indefinitely on the first frame.
-
-        config DISPLAY_FRAME_TIMEOUT_FAIL_OPEN
-            bool "Continue playback after display timeout (diagnostic)"
-            default n
-            help
-                Diagnostic option only.
-
-                When enabled, the player logs display timeout errors but keeps
-                decoding audio/video instead of aborting playback. This helps
-                determine whether black screen is caused by display callback
-                stalls while the decode pipeline itself is still healthy.
-
     endmenu
 
     menu "Audio Decoder Configuration"

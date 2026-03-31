@@ -11,7 +11,6 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
-#include "esp_lcd_panel_ops.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_codec_dev.h"
 #include "driver/gpio.h"
@@ -21,16 +20,29 @@
 
 static const char *TAG = "main";
 
+#ifdef CONFIG_BSP_LCD_TYPE_HDMI
+#define DISPLAY_OUTPUT_H_RES 800
+#define DISPLAY_OUTPUT_V_RES 600
+// #define DISPLAY_OUTPUT_H_RES 1280
+// #define DISPLAY_OUTPUT_V_RES 720
+#define DISPLAY_LANE_BITRATE_MBPS BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS
+#else
+#define DISPLAY_OUTPUT_H_RES BSP_LCD_H_RES
+#define DISPLAY_OUTPUT_V_RES BSP_LCD_V_RES
+#define DISPLAY_LANE_BITRATE_MBPS BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS
+#endif
+
 #ifdef CONFIG_BSP_LCD_COLOR_FORMAT_RGB888
-#define DISPLAY_BUFFER_SIZE (BSP_LCD_H_RES * BSP_LCD_V_RES * 3)
+#define DISPLAY_BUFFER_SIZE (DISPLAY_OUTPUT_H_RES * DISPLAY_OUTPUT_V_RES * 3)
 #define BYTES_PER_PIXEL 3
 #else
-#define DISPLAY_BUFFER_SIZE (BSP_LCD_H_RES * BSP_LCD_V_RES * 2)
+#define DISPLAY_BUFFER_SIZE (DISPLAY_OUTPUT_H_RES * DISPLAY_OUTPUT_V_RES * 2)
 #define BYTES_PER_PIXEL 2
 #endif
 
 #define MP4_FILENAME   BSP_SD_MOUNT_POINT "/" CONFIG_MP4_FILENAME
 #define ENABLE_LOOP_PLAYBACK    1
+#define ENABLE_AUDIO_PLAYBACK   0
 
 static esp_lcd_panel_handle_t lcd_panel;
 static esp_lcd_panel_io_handle_t lcd_io;
@@ -38,17 +50,12 @@ static void *lcd_buffer[CONFIG_BSP_LCD_DPI_BUFFER_NUMS];
 static SemaphoreHandle_t trans_sem = NULL;
 static app_stream_adapter_handle_t stream_adapter;
 static esp_codec_dev_handle_t g_audio_dev = NULL;  // Global audio device handle
-static volatile uint32_t s_display_callback_count;
-static volatile uint32_t s_display_submitted_frames;
-static volatile uint32_t s_display_timeout_count;
 
 static void play_media_file(const char *filename);
 
-static bool flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
+static IRAM_ATTR bool flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
     BaseType_t taskAwake = pdFALSE;
-
-    s_display_callback_count++;
 
     if (trans_sem) {
         xSemaphoreGiveFromISR(trans_sem, &taskAwake);
@@ -62,46 +69,9 @@ static esp_err_t display_decoded_frame(uint8_t *buffer, uint32_t buffer_size,
                                        uint32_t buffer_index, void *user_data)
 {
     // user_data can be used to pass context information such as LCD handle or display state
-    const uint32_t callback_count_before = s_display_callback_count;
-    esp_err_t ret = esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Display submit failed for frame %" PRIu32 ": %s", buffer_index, esp_err_to_name(ret));
-        return ret;
-    }
-    s_display_submitted_frames++;
-#if CONFIG_USE_LCD_BUFFER
+    esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
     xSemaphoreTake(trans_sem, 0);
-#endif
-
-    if (xSemaphoreTake(trans_sem, pdMS_TO_TICKS(CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS)) != pdTRUE) {
-        s_display_timeout_count++;
-        ESP_LOGE(TAG,
-                 "Display callback timeout after %d ms for frame %" PRIu32
-                 " (%" PRIu32 "x%" PRIu32 ", submitted=%" PRIu32
-                 ", callbacks_before=%" PRIu32 ", callbacks_now=%" PRIu32
-                 ", timeouts=%" PRIu32 ", wait_cb=%s)",
-                 CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS,
-                 buffer_index, width, height,
-                 s_display_submitted_frames,
-                 callback_count_before, s_display_callback_count,
-                 s_display_timeout_count,
-#if CONFIG_USE_LCD_BUFFER
-                 "on_refresh_done"
-#else
-                 "on_color_trans_done"
-#endif
-        );
-#if CONFIG_DISPLAY_FRAME_TIMEOUT_FAIL_OPEN
-        return ESP_OK;
-#else
-        return ESP_ERR_TIMEOUT;
-#endif
-    }
-
-    if (buffer_index < 3) {
-        ESP_LOGI(TAG, "Display frame %" PRIu32 " completed, callback_count=%" PRIu32,
-                 buffer_index, s_display_callback_count);
-    }
+    xSemaphoreTake(trans_sem, portMAX_DELAY);
 
     return ESP_OK;
 }
@@ -112,12 +82,16 @@ void app_main()
 
     // Initialize display
     bsp_display_config_t display_config = {
-        .hdmi_resolution = BSP_HDMI_RES_1280x720,
+        .hdmi_resolution = BSP_HDMI_RES_800x600,
+        // .hdmi_resolution = BSP_HDMI_RES_1280x720,
         .dsi_bus = {
             .phy_clk_src = 0,
-            .lane_bit_rate_mbps = BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS,
+            .lane_bit_rate_mbps = DISPLAY_LANE_BITRATE_MBPS,
         }
     };
+
+    ESP_LOGI(TAG, "Display timing: %dx%d, DSI lane bitrate: %d Mbps",
+             DISPLAY_OUTPUT_H_RES, DISPLAY_OUTPUT_V_RES, DISPLAY_LANE_BITRATE_MBPS);
 
     esp_err_t ret = bsp_display_new(&display_config, &lcd_panel, &lcd_io);
     if (ret != ESP_OK) {
@@ -127,41 +101,21 @@ void app_main()
 
     trans_sem = xSemaphoreCreateBinary();
     esp_lcd_dpi_panel_event_callbacks_t callbacks = {
-#if CONFIG_USE_LCD_BUFFER
-        .on_refresh_done = flush_dpi_panel_ready_callback,
-#else
         .on_color_trans_done = flush_dpi_panel_ready_callback,
-#endif
     };
     esp_lcd_dpi_panel_register_event_callbacks(lcd_panel, &callbacks, NULL);
-    ESP_LOGI(TAG,
-             "Display callback mode=%s timeout=%d ms fail_open=%s buffers=%d",
-#if CONFIG_USE_LCD_BUFFER
-             "on_refresh_done",
-#else
-             "on_color_trans_done",
-#endif
-             CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS,
-#if CONFIG_DISPLAY_FRAME_TIMEOUT_FAIL_OPEN
-             "yes",
-#else
-             "no",
-#endif
-             CONFIG_BSP_LCD_DPI_BUFFER_NUMS);
 
-#if CONFIG_USE_LCD_BUFFER
-    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcd_panel, CONFIG_BSP_LCD_DPI_BUFFER_NUMS, &lcd_buffer[0], &lcd_buffer[1]));
-#else
     size_t data_cache_line_size = 0;
     ESP_ERROR_CHECK(esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &data_cache_line_size));
     for (int i = 0; i < CONFIG_BSP_LCD_DPI_BUFFER_NUMS; i++) {
-        lcd_buffer[i] = heap_caps_aligned_calloc(data_cache_line_size, 1, DISPLAY_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+        lcd_buffer[i] = heap_caps_aligned_calloc(data_cache_line_size, 1, DISPLAY_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (lcd_buffer[i] == NULL) {
             ESP_LOGE(TAG, "Failed to allocate buffer %d", i);
             return;
         }
     }
-#endif
+    ESP_LOGI(TAG, "Allocated %d external decode buffers (%u bytes each)",
+             CONFIG_BSP_LCD_DPI_BUFFER_NUMS, (unsigned)DISPLAY_BUFFER_SIZE);
 
     ret = bsp_sdcard_mount();
     if (ret != ESP_OK) {
@@ -169,9 +123,10 @@ void app_main()
         return;
     }
 
-    // Initialize audio codec
+    esp_codec_dev_handle_t audio_dev = NULL;
+#if ENABLE_AUDIO_PLAYBACK
     ESP_LOGI(TAG, "Initializing audio codec...");
-    esp_codec_dev_handle_t audio_dev = bsp_audio_codec_speaker_init();
+    audio_dev = bsp_audio_codec_speaker_init();
     if (audio_dev == NULL) {
         ESP_LOGW(TAG, "Failed to initialize audio codec, continuing without audio");
         g_audio_dev = NULL;
@@ -180,6 +135,10 @@ void app_main()
         esp_codec_dev_set_out_vol(audio_dev, 60);
         g_audio_dev = audio_dev;
     }
+#else
+    ESP_LOGI(TAG, "Audio playback disabled, starting in video-only mode");
+    g_audio_dev = NULL;
+#endif
 
     // Initialize stream adapter with unified configuration
     ESP_LOGI(TAG, "Initializing stream adapter...");
@@ -195,12 +154,15 @@ void app_main()
         .buffer_size = DISPLAY_BUFFER_SIZE,
         .audio_dev = audio_dev,
 #ifdef CONFIG_BSP_LCD_COLOR_FORMAT_RGB888
-        .jpeg_config = APP_STREAM_JPEG_CONFIG_DEFAULT_RGB888(),
+        .jpeg_config = {
+            .output_format = APP_STREAM_JPEG_OUTPUT_RGB888,
+            .bgr_order = true,
+        },
 #else
         .jpeg_config = APP_STREAM_JPEG_CONFIG_DEFAULT_RGB565(),
 #endif
-        .target_width = BSP_LCD_H_RES,
-        .target_height = BSP_LCD_V_RES,
+        .target_width = DISPLAY_OUTPUT_H_RES,
+        .target_height = DISPLAY_OUTPUT_V_RES,
     };
 
     ret = app_stream_adapter_init(&adapter_config, &stream_adapter);
@@ -213,14 +175,17 @@ void app_main()
     }
 
     const char *format_str = (adapter_config.jpeg_config.output_format == APP_STREAM_JPEG_OUTPUT_RGB888) ? "RGB888" : "RGB565";
-    ESP_LOGI(TAG, "Stream adapter initialized with %s format%s", format_str,
-             audio_dev ? " and audio support" : "");
+    ESP_LOGI(TAG, "Stream adapter initialized with %s/%s at %dx%d%s",
+             format_str,
+             adapter_config.jpeg_config.bgr_order ? "BGR" : "RGB",
+             DISPLAY_OUTPUT_H_RES, DISPLAY_OUTPUT_V_RES,
+             audio_dev ? " and audio support" : " (video-only)");
 
     FILE *fp = fopen(MP4_FILENAME, "rb");
     if (fp) {
         fclose(fp);
 
-        app_stream_adapter_set_file(stream_adapter, MP4_FILENAME, g_audio_dev != NULL);
+        app_stream_adapter_set_file(stream_adapter, MP4_FILENAME, false);
         play_media_file(MP4_FILENAME);
     } else {
         ESP_LOGW(TAG, "MP4 file not found: %s", MP4_FILENAME);
@@ -289,7 +254,7 @@ static void play_media_file(const char *filename)
         // Stop and reset for next loop
         app_stream_adapter_stop(stream_adapter);
         vTaskDelay(pdMS_TO_TICKS(200)); // Brief pause
-        app_stream_adapter_set_file(stream_adapter, filename, g_audio_dev != NULL);
+        app_stream_adapter_set_file(stream_adapter, filename, false);
     }
 #else
     // Single playback mode
