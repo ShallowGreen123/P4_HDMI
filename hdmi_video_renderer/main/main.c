@@ -38,12 +38,17 @@ static void *lcd_buffer[CONFIG_BSP_LCD_DPI_BUFFER_NUMS];
 static SemaphoreHandle_t trans_sem = NULL;
 static app_stream_adapter_handle_t stream_adapter;
 static esp_codec_dev_handle_t g_audio_dev = NULL;  // Global audio device handle
+static volatile uint32_t s_display_callback_count;
+static volatile uint32_t s_display_submitted_frames;
+static volatile uint32_t s_display_timeout_count;
 
 static void play_media_file(const char *filename);
 
 static bool flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
     BaseType_t taskAwake = pdFALSE;
+
+    s_display_callback_count++;
 
     if (trans_sem) {
         xSemaphoreGiveFromISR(trans_sem, &taskAwake);
@@ -57,11 +62,46 @@ static esp_err_t display_decoded_frame(uint8_t *buffer, uint32_t buffer_size,
                                        uint32_t buffer_index, void *user_data)
 {
     // user_data can be used to pass context information such as LCD handle or display state
-    esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
+    const uint32_t callback_count_before = s_display_callback_count;
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Display submit failed for frame %" PRIu32 ": %s", buffer_index, esp_err_to_name(ret));
+        return ret;
+    }
+    s_display_submitted_frames++;
 #if CONFIG_USE_LCD_BUFFER
     xSemaphoreTake(trans_sem, 0);
 #endif
-    xSemaphoreTake(trans_sem, portMAX_DELAY);
+
+    if (xSemaphoreTake(trans_sem, pdMS_TO_TICKS(CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS)) != pdTRUE) {
+        s_display_timeout_count++;
+        ESP_LOGE(TAG,
+                 "Display callback timeout after %d ms for frame %" PRIu32
+                 " (%" PRIu32 "x%" PRIu32 ", submitted=%" PRIu32
+                 ", callbacks_before=%" PRIu32 ", callbacks_now=%" PRIu32
+                 ", timeouts=%" PRIu32 ", wait_cb=%s)",
+                 CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS,
+                 buffer_index, width, height,
+                 s_display_submitted_frames,
+                 callback_count_before, s_display_callback_count,
+                 s_display_timeout_count,
+#if CONFIG_USE_LCD_BUFFER
+                 "on_refresh_done"
+#else
+                 "on_color_trans_done"
+#endif
+        );
+#if CONFIG_DISPLAY_FRAME_TIMEOUT_FAIL_OPEN
+        return ESP_OK;
+#else
+        return ESP_ERR_TIMEOUT;
+#endif
+    }
+
+    if (buffer_index < 3) {
+        ESP_LOGI(TAG, "Display frame %" PRIu32 " completed, callback_count=%" PRIu32,
+                 buffer_index, s_display_callback_count);
+    }
 
     return ESP_OK;
 }
@@ -94,6 +134,20 @@ void app_main()
 #endif
     };
     esp_lcd_dpi_panel_register_event_callbacks(lcd_panel, &callbacks, NULL);
+    ESP_LOGI(TAG,
+             "Display callback mode=%s timeout=%d ms fail_open=%s buffers=%d",
+#if CONFIG_USE_LCD_BUFFER
+             "on_refresh_done",
+#else
+             "on_color_trans_done",
+#endif
+             CONFIG_DISPLAY_FRAME_WAIT_TIMEOUT_MS,
+#if CONFIG_DISPLAY_FRAME_TIMEOUT_FAIL_OPEN
+             "yes",
+#else
+             "no",
+#endif
+             CONFIG_BSP_LCD_DPI_BUFFER_NUMS);
 
 #if CONFIG_USE_LCD_BUFFER
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(lcd_panel, CONFIG_BSP_LCD_DPI_BUFFER_NUMS, &lcd_buffer[0], &lcd_buffer[1]));

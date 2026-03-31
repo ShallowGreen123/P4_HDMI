@@ -1,2 +1,5 @@
 build/
 managed_components/
+.tmp_pymupdf/
+.tmp_pypdf/
+hdmi_video_renderer/.vscode/

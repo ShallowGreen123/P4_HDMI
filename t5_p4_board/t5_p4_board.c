@@ -24,6 +24,14 @@
 #include "bsp/esp-bsp.h"
 #include "bsp_err_check.h"
 
+#ifndef CONFIG_BSP_LCD_LT8912B_MIPI_PN_SWAP
+#define CONFIG_BSP_LCD_LT8912B_MIPI_PN_SWAP 0
+#endif
+
+#ifndef CONFIG_BSP_LCD_LT8912B_MIPI_LANE_SWAP
+#define CONFIG_BSP_LCD_LT8912B_MIPI_LANE_SWAP 0
+#endif
+
 #define PCA9535_INPUT_PORT_0_REG      0x00
 #define PCA9535_OUTPUT_PORT_0_REG     0x02
 #define PCA9535_CONFIG_PORT_0_REG     0x06
@@ -44,6 +52,7 @@ static bool s_i2c_initialized;
 static bool s_pca9535_initialized;
 static bool s_sdspi_initialized;
 static bool s_hdmi_powered;
+static bool s_hdmi_int_gpio_configured;
 
 static i2c_master_bus_handle_t s_i2c_handle;
 static i2c_master_dev_handle_t s_pca9535_dev;
@@ -125,6 +134,63 @@ static void display_handles_reset(bsp_lcd_handles_t *handles)
     }
 
     memset(handles, 0, sizeof(*handles));
+}
+
+static esp_err_t ensure_hdmi_int_gpio(void)
+{
+    if (s_hdmi_int_gpio_configured) {
+        return ESP_OK;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << T5_BOARD_HDMI_INT_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "Configure HDMI INT GPIO failed");
+    s_hdmi_int_gpio_configured = true;
+    return ESP_OK;
+}
+
+static int get_pca_input_level(const uint8_t inputs[2], uint8_t io_num)
+{
+    const uint8_t port = io_num / 8;
+    const uint8_t bit = 1U << (io_num % 8);
+    return (inputs[port] & bit) ? 1 : 0;
+}
+
+static void log_hdmi_power_debug_state(const char *stage)
+{
+    uint8_t inputs[2] = {0};
+    int hdmi_int_level = -1;
+    esp_err_t pca_ret = ESP_ERR_INVALID_STATE;
+
+    if (s_pca9535_initialized && (s_pca9535_dev != NULL)) {
+        pca_ret = pca9535_read_registers(PCA9535_INPUT_PORT_0_REG, inputs, sizeof(inputs));
+        if (pca_ret != ESP_OK) {
+            ESP_LOGW(TAG, "HDMI %s: read PCA9535 input state failed: %s", stage, esp_err_to_name(pca_ret));
+        }
+    }
+
+    esp_err_t gpio_ret = ensure_hdmi_int_gpio();
+    if (gpio_ret == ESP_OK) {
+        hdmi_int_level = gpio_get_level(T5_BOARD_HDMI_INT_GPIO);
+    } else {
+        ESP_LOGW(TAG, "HDMI %s: configure HDMI INT GPIO failed: %s", stage, esp_err_to_name(gpio_ret));
+    }
+
+    ESP_LOGI(TAG,
+             "HDMI %s: powered=%s out=0x%02X/0x%02X dir=0x%02X/0x%02X in=0x%02X/0x%02X io10_1v8=%d io7_en=%d io6_rst=%d int_gpio=%d",
+             stage, s_hdmi_powered ? "yes" : "no",
+             s_pca_output_state[0], s_pca_output_state[1],
+             s_pca_config_state[0], s_pca_config_state[1],
+             inputs[0], inputs[1],
+             (pca_ret == ESP_OK) ? get_pca_input_level(inputs, T5_BOARD_PCA_IO_HDMI_1V8_ENABLE) : -1,
+             (pca_ret == ESP_OK) ? get_pca_input_level(inputs, T5_BOARD_PCA_IO_HDMI_ENABLE) : -1,
+             (pca_ret == ESP_OK) ? get_pca_input_level(inputs, T5_BOARD_PCA_IO_HDMI_RESET) : -1,
+             hdmi_int_level);
 }
 
 static esp_err_t bsp_enable_dsi_phy_power(void)
@@ -320,6 +386,7 @@ esp_err_t t5_board_hdmi_power_on(void)
     log_i2c_probe("LT8912B AVI", T5_BOARD_I2C_ADDR_LT8912B_AVI);
 
     s_hdmi_powered = true;
+    log_hdmi_power_debug_state("after-power-on");
     return ESP_OK;
 }
 
@@ -334,6 +401,7 @@ esp_err_t t5_board_hdmi_power_off(void)
     BSP_ERROR_CHECK_RETURN_ERR(t5_board_pca9535_set_level(T5_BOARD_PCA_IO_HDMI_ENABLE, false));
     BSP_ERROR_CHECK_RETURN_ERR(t5_board_pca9535_set_level(T5_BOARD_PCA_IO_HDMI_1V8_ENABLE, false));
     s_hdmi_powered = false;
+    log_hdmi_power_debug_state("after-power-off");
     return ESP_OK;
 }
 
@@ -767,6 +835,17 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
                       "Create LT8912B panel failed");
     ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(handles.panel), err, TAG, "LT8912B panel reset failed");
     ESP_GOTO_ON_ERROR(esp_lcd_panel_init(handles.panel), err, TAG, "LT8912B panel init failed");
+
+    bool hdmi_ready = esp_lcd_panel_lt8912b_is_ready(handles.panel);
+    ESP_LOGI(TAG, "LT8912B HPD/ready after init: %s", hdmi_ready ? "ready" : "not ready");
+    ESP_LOGI(TAG, "LT8912B diagnostics config: test_pattern=%d pn_swap=%d lane_swap=%d",
+             CONFIG_BSP_LCD_LT8912B_TEST_PATTERN,
+             CONFIG_BSP_LCD_LT8912B_MIPI_PN_SWAP,
+             CONFIG_BSP_LCD_LT8912B_MIPI_LANE_SWAP);
+#if CONFIG_BSP_LCD_LT8912B_TEST_PATTERN
+    ESP_LOGW(TAG, "LT8912B built-in test pattern is enabled for diagnosis");
+#endif
+    log_hdmi_power_debug_state("after-panel-init");
 
     s_display_handles = handles;
     *ret_handles = handles;

@@ -1,0 +1,22 @@
+先看日志里的硬结论：
+
+LT8912B 的供电、使能、复位都已经起来了。log.txt (line 261) 里 io10_1v8=1 io7_en=1 io6_rst=1，说明 1V8_EN、HDMI_EN、HDMI_RST 当前电平和我们预期一致。
+测试图分支已经真的执行了，不再是“没编进去”。log.txt (line 267) 和 log.txt (line 271) 明确显示请求并重新下发了 test pattern。
+播放器没有卡死。log.txt (line 344) log.txt (line 345) log.txt (line 346) 连续有 Display frame ... completed，所以解码和显示提交链路是活的。
+真正异常是 HPD 一直没起来。log.txt (line 266) 到 log.txt (line 275) 一直是 HPD=0x00 / LT8912B HPD/ready after init: not ready，而且 MIPI sync 也一直是 0x00 0x00。
+再对照原理图 T5-P4 E-paper V0.1.pdf：
+
+第 4 页能对上 PCA9535 U1 控的就是 HDMI_RST、HDMI_EN、1V8_EN。
+第 7 页能对上 LT8912B 的 INT 接 HDMI_INT/IO4，RESET_N 接 HDMI_RST，配置 I2C 接 SDA/IO7、SCL/IO8。
+更关键的是第 7 页还能看到 HDMI 口 HOT_PLUG_DET 走到 HPD_DET/TX_HPD，DDC 的 SDA/SCL 走 DSDA/DSCL，中间还有电平转换和 VDD5V/VDD3V3 相关器件。
+这几条放在一起，含义是：
+
+软件已经把 LT8912B 配好了，测试图命令也发了。
+板级 1.8V / EN / RESET 没明显问题。
+但 LT8912B 没看到 HDMI 端的 hot-plug ready，所以更像是 HDMI 口这一侧的问题：线材、显示器、HPD_DET 路径、DDC 电平转换、或 HDMI 5V 相关部分。
+所以我建议下一步先不要优先折腾 lane swap。更值得先查的是：
+
+换一根 HDMI 线，或换一个显示器/输入口。
+确认显示器端不是单纯 No Signal。
+如果方便测硬件，优先量第 7 页这几处：HDMI 口 +5V、HOT_PLUG_DET/HPD_DET、DSDA/DSCL，以及 LT8912B 周围的 VDD1V8。
+如果你愿意继续，我下一步可以直接把排查收敛成“测哪几个点、正常值大概是什么”，按原理图页号给你列一个最短检查清单。

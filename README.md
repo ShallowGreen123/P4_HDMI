@@ -1,3 +1,9 @@
+1V8_EN、HDMI_EN、HDMI_RST、HDMI_INT 
+PAC_IO12、PAC_IO07、PAC_IO06、IO4
+
+
+
+
 | Supported Targets | ESP32-P4 |
 | ----------------- | -------- |
 
