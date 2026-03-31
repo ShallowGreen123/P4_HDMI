@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 #include "esp_lcd_mipi_dsi.h"
+#include "esp_lcd_panel_ops.h"
 #include "esp_lcd_types.h"
 #include "sdkconfig.h"
 
@@ -31,6 +32,9 @@
 #elif CONFIG_BSP_LCD_HDMI_1024x768_60HZ
 #define BSP_LCD_H_RES               (1024)
 #define BSP_LCD_V_RES               (768)
+#elif CONFIG_BSP_LCD_HDMI_1280x720_60HZ
+#define BSP_LCD_H_RES               (1280)
+#define BSP_LCD_V_RES               (720)
 #elif CONFIG_BSP_LCD_HDMI_1280x800_60HZ
 #define BSP_LCD_H_RES               (1280)
 #define BSP_LCD_V_RES               (800)
@@ -38,8 +42,8 @@
 #define BSP_LCD_H_RES               (1920)
 #define BSP_LCD_V_RES               (1080)
 #else
-#define BSP_LCD_H_RES               (1280)
-#define BSP_LCD_V_RES               (720)
+#define BSP_LCD_H_RES               (800)
+#define BSP_LCD_V_RES               (600)
 #endif
 
 #define BSP_LCD_MIPI_DSI_LANE_NUM           (2)
@@ -64,12 +68,14 @@ typedef enum {
 #define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_800x600
 #elif CONFIG_BSP_LCD_HDMI_1024x768_60HZ
 #define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_1024x768
+#elif CONFIG_BSP_LCD_HDMI_1280x720_60HZ
+#define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_1280x720
 #elif CONFIG_BSP_LCD_HDMI_1280x800_60HZ
 #define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_1280x800
 #elif CONFIG_BSP_LCD_HDMI_1920x1080_30HZ
 #define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_1920x1080
 #else
-#define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_1280x720
+#define BSP_HDMI_DEFAULT_RESOLUTION BSP_HDMI_RES_800x600
 #endif
 
 typedef struct {

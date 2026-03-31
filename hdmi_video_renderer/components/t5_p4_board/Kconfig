@@ -86,7 +86,7 @@ menu "Board Support Package (T5-P4 E-Paper)"
         choice BSP_LCD_HDMI_RESOLUTION
             depends on BSP_LCD_TYPE_HDMI
             prompt "Select HDMI resolution"
-            default BSP_LCD_HDMI_1280x720_60HZ
+            default BSP_LCD_HDMI_800x600_60HZ
 
             config BSP_LCD_HDMI_800x600_60HZ
                 bool "800x600@60HZ"

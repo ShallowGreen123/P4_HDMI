@@ -44,6 +44,7 @@ Run `idf.py menuconfig` and navigate to `HDMI MP4 Player Configuration` menu.
 ### Test Video Downloads
 
 This repository provides a test MP4 file encoded with MJPEG video and AAC audio for testing and compatibility purposes.
+The current T5-P4 demo boots in video-only mode by default, so the AAC track is present for optional validation rather than enabled playback.
 
 - **Video Codec**: MJPEG  
 - **Audio Codec**: AAC  
@@ -62,7 +63,7 @@ Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project
 The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from registry into `managed_components` folder.
 
 The example is validated for the T5-P4 HDMI path with `CONFIG_BSP_LCD_TYPE_HDMI=y`,
-`CONFIG_BSP_LCD_COLOR_FORMAT_RGB888=y`, and default `1280x720` output.
+`CONFIG_BSP_LCD_COLOR_FORMAT_RGB888=y`, default `800x600` output, and video-only playback (`ENABLE_AUDIO_PLAYBACK=0`).
 
 (To exit the serial monitor, type ``Ctrl-]``.)
 
@@ -79,7 +80,7 @@ For any technical queries, please open an [issue](https://github.com/espressif/e
 1. **MP4 Container Format**
    - Currently only supports MP4 files with MJPEG video encoding
    - Other video codecs (H.264, H.265, etc.) are not supported at this time
-   - Audio tracks in MP4 files are supported
+   - Audio tracks in MP4 files are supported by the codebase, but the default demo configuration keeps playback disabled
 
 2. **Video Resolution and Format**
    - For YUV420 format videos:
@@ -99,7 +100,7 @@ For any technical queries, please open an [issue](https://github.com/espressif/e
    - When using LCD internal buffer mode:
      * Video resolution must exactly match the HDMI output resolution
      * This ensures optimal performance and prevents display artifacts
-     * Example: If HDMI is set to 1280x720, the MP4 must also be 1280x720
+     * Example: If HDMI is set to 800x600, the MP4 must also be 800x600
    - When using external buffer mode:
      * More flexible resolution support
      * Automatic scaling is available
