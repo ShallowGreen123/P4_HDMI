@@ -44,6 +44,8 @@
 #define HDMI_ENABLE_DELAY_MS          10
 #define HDMI_RESET_LOW_DELAY_MS       50
 #define HDMI_POWER_STABLE_DELAY_MS    120
+#define HDMI_READY_RETRY_COUNT        10
+#define HDMI_READY_RETRY_DELAY_MS     100
 #define AUDIO_AMP_STABLE_DELAY_MS     10
 
 #if CONFIG_BSP_LCD_TYPE_HDMI && !CONFIG_BSP_LCD_COLOR_FORMAT_RGB888
@@ -68,6 +70,36 @@ static bsp_lcd_handles_t s_display_handles;
 static esp_ldo_channel_handle_t s_dsi_phy_ldo_chan;
 static uint8_t s_pca_output_state[2];
 static uint8_t s_pca_config_state[2] = {0xFF, 0xFF};
+
+static void log_sdspi_pin_levels(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "SD SPI %s: host=SPI%d miso=%d(%d) clk=%d(%d) mosi=%d(%d) cs=%d(%d)",
+             stage, BSP_SDSPI_HOST + 1,
+             BSP_SD_SPI_MISO, gpio_get_level(BSP_SD_SPI_MISO),
+             BSP_SD_SPI_CLK, gpio_get_level(BSP_SD_SPI_CLK),
+             BSP_SD_SPI_MOSI, gpio_get_level(BSP_SD_SPI_MOSI),
+             BSP_SD_SPI_CS, gpio_get_level(BSP_SD_SPI_CS));
+}
+
+static esp_err_t prepare_sdspi_pins(void)
+{
+    const gpio_num_t pins[] = {
+        BSP_SD_SPI_MISO,
+        BSP_SD_SPI_CLK,
+        BSP_SD_SPI_MOSI,
+        BSP_SD_SPI_CS,
+    };
+
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
+        ESP_RETURN_ON_ERROR(gpio_input_enable(pins[i]), TAG, "Enable SD SPI GPIO input failed");
+        ESP_RETURN_ON_ERROR(gpio_pullup_en(pins[i]), TAG, "Enable SD SPI pull-up failed");
+        ESP_RETURN_ON_ERROR(gpio_pulldown_dis(pins[i]), TAG, "Disable SD SPI pull-down failed");
+    }
+
+    log_sdspi_pin_levels("before-init");
+    return ESP_OK;
+}
 
 static esp_err_t ensure_i2c_bus(void)
 {
@@ -457,6 +489,11 @@ esp_err_t bsp_sdcard_sdspi_mount(bsp_sdcard_cfg_t *cfg)
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "Initializing SD card over SPI at %s", BSP_SD_MOUNT_POINT);
+    ESP_LOGI(TAG, "SD SPI pins: MISO=%d CLK=%d MOSI=%d CS=%d",
+             BSP_SD_SPI_MISO, BSP_SD_SPI_CLK, BSP_SD_SPI_MOSI, BSP_SD_SPI_CS);
+    ESP_RETURN_ON_ERROR(prepare_sdspi_pins(), TAG, "Prepare SD SPI pins failed");
+
     if (!s_sdspi_initialized) {
         const spi_bus_config_t buscfg = {
             .sclk_io_num = BSP_SD_SPI_CLK,
@@ -493,6 +530,13 @@ esp_err_t bsp_sdcard_sdspi_mount(bsp_sdcard_cfg_t *cfg)
 
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "SD card mounted over SPI at %s", BSP_SD_MOUNT_POINT);
+        log_sdspi_pin_levels("after-mount");
+    } else {
+        ESP_LOGE(TAG, "SD card mount failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        log_sdspi_pin_levels("after-failure");
+        if (ret == ESP_ERR_INVALID_RESPONSE) {
+            ESP_LOGW(TAG, "Invalid SD response during CMD8 probe. Check card insertion, SD pull-ups, pin mapping, and board-specific SD power.");
+        }
     }
     return ret;
 }
@@ -840,7 +884,17 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
     ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(handles.panel), err, TAG, "LT8912B panel reset failed");
     ESP_GOTO_ON_ERROR(esp_lcd_panel_init(handles.panel), err, TAG, "LT8912B panel init failed");
 
-    bool hdmi_ready = esp_lcd_panel_lt8912b_is_ready(handles.panel);
+    bool hdmi_ready = false;
+    for (int attempt = 0; attempt < HDMI_READY_RETRY_COUNT; ++attempt) {
+        hdmi_ready = esp_lcd_panel_lt8912b_is_ready(handles.panel);
+        ESP_LOGI(TAG, "LT8912B ready check %d/%d: %s",
+                 attempt + 1, HDMI_READY_RETRY_COUNT, hdmi_ready ? "ready" : "not ready");
+        if (hdmi_ready) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(HDMI_READY_RETRY_DELAY_MS));
+    }
+
     ESP_LOGI(TAG, "LT8912B HPD/ready after init: %s", hdmi_ready ? "ready" : "not ready");
     ESP_LOGI(TAG, "LT8912B diagnostics config: test_pattern=%d pn_swap=%d lane_swap=%d",
              CONFIG_BSP_LCD_LT8912B_TEST_PATTERN,

@@ -13,6 +13,7 @@
 #include "esp_memory_utils.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_codec_dev.h"
+#include "esp_lcd_lt8912b.h"
 #include "driver/gpio.h"
 #include "bsp/esp-bsp.h"
 #include "app_stream_adapter.h"
@@ -43,6 +44,8 @@ static const char *TAG = "main";
 #define MP4_FILENAME   BSP_SD_MOUNT_POINT "/" CONFIG_MP4_FILENAME
 #define ENABLE_LOOP_PLAYBACK    1
 #define ENABLE_AUDIO_PLAYBACK   0
+#define DISPLAY_FLUSH_TIMEOUT_MS 1000
+#define DISPLAY_BOOT_TEST_FRAME_DELAY_MS 500
 
 static esp_lcd_panel_handle_t lcd_panel;
 static esp_lcd_panel_io_handle_t lcd_io;
@@ -50,8 +53,10 @@ static void *lcd_buffer[CONFIG_BSP_LCD_DPI_BUFFER_NUMS];
 static SemaphoreHandle_t trans_sem = NULL;
 static app_stream_adapter_handle_t stream_adapter;
 static esp_codec_dev_handle_t g_audio_dev = NULL;  // Global audio device handle
+static uint32_t s_display_submit_count = 0;
 
 static void play_media_file(const char *filename);
+static void fill_display_boot_test_frame(void *buffer, uint32_t width, uint32_t height);
 
 static IRAM_ATTR bool flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
@@ -68,12 +73,57 @@ static esp_err_t display_decoded_frame(uint8_t *buffer, uint32_t buffer_size,
                                        uint32_t width, uint32_t height,
                                        uint32_t buffer_index, void *user_data)
 {
-    // user_data can be used to pass context information such as LCD handle or display state
-    esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
-    xSemaphoreTake(trans_sem, 0);
-    xSemaphoreTake(trans_sem, portMAX_DELAY);
+    // Clear any stale completion before submitting the next frame. The DPI driver can
+    // invoke on_color_trans_done synchronously from draw_bitmap(), so draining after the
+    // draw would consume the current frame's completion and deadlock on the next wait.
+    if (trans_sem) {
+        xSemaphoreTake(trans_sem, 0);
+    }
+
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(lcd_panel, 0, 0, width, height, buffer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to submit frame %" PRIu32 ": %s", buffer_index, esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (trans_sem &&
+        xSemaphoreTake(trans_sem, pdMS_TO_TICKS(DISPLAY_FLUSH_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Display flush timeout on frame %" PRIu32 " (%" PRIu32 "x%" PRIu32 ")",
+                 buffer_index, width, height);
+    }
+
+    s_display_submit_count++;
+    if (buffer_index < 3 || (s_display_submit_count % 30) == 0) {
+        bool hdmi_ready = esp_lcd_panel_lt8912b_is_ready(lcd_panel);
+        ESP_LOGI(TAG, "Submitted frame %" PRIu32 " (%" PRIu32 "x%" PRIu32 "), LT8912 ready=%s, total=%" PRIu32,
+                 buffer_index, width, height, hdmi_ready ? "yes" : "no", s_display_submit_count);
+    }
 
     return ESP_OK;
+}
+
+static void fill_display_boot_test_frame(void *buffer, uint32_t width, uint32_t height)
+{
+    if (buffer == NULL) {
+        return;
+    }
+
+    uint8_t *pixels = (uint8_t *)buffer;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            uint8_t shade = 0x10;
+            if (x < (width / 3)) {
+                shade = 0xFF;
+            } else if (x < ((width * 2) / 3)) {
+                shade = 0x88;
+            }
+
+            size_t offset = ((size_t)y * width + x) * BYTES_PER_PIXEL;
+            pixels[offset + 0] = shade;
+            pixels[offset + 1] = shade;
+            pixels[offset + 2] = shade;
+        }
+    }
 }
 
 void app_main()
@@ -100,10 +150,14 @@ void app_main()
     }
 
     trans_sem = xSemaphoreCreateBinary();
+    if (trans_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create display flush semaphore");
+        return;
+    }
     esp_lcd_dpi_panel_event_callbacks_t callbacks = {
         .on_color_trans_done = flush_dpi_panel_ready_callback,
     };
-    esp_lcd_dpi_panel_register_event_callbacks(lcd_panel, &callbacks, NULL);
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(lcd_panel, &callbacks, NULL));
 
     size_t data_cache_line_size = 0;
     ESP_ERROR_CHECK(esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &data_cache_line_size));
@@ -117,9 +171,20 @@ void app_main()
     ESP_LOGI(TAG, "Allocated %d external decode buffers (%u bytes each)",
              CONFIG_BSP_LCD_DPI_BUFFER_NUMS, (unsigned)DISPLAY_BUFFER_SIZE);
 
+    fill_display_boot_test_frame(lcd_buffer[0], DISPLAY_OUTPUT_H_RES, DISPLAY_OUTPUT_V_RES);
+    ESP_LOGI(TAG, "Submitting boot diagnostic frame");
+    ret = display_decoded_frame((uint8_t *)lcd_buffer[0], DISPLAY_BUFFER_SIZE,
+                                DISPLAY_OUTPUT_H_RES, DISPLAY_OUTPUT_V_RES,
+                                0, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to draw boot diagnostic frame: %s", esp_err_to_name(ret));
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(DISPLAY_BOOT_TEST_FRAME_DELAY_MS));
+
     ret = bsp_sdcard_mount();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount SD card");
+        ESP_LOGE(TAG, "Failed to mount SD card: %s (0x%x)", esp_err_to_name(ret), ret);
         return;
     }
 
